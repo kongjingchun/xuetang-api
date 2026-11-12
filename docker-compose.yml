@@ -1,0 +1,156 @@
+# @File    : docker-compose.yml
+# @Desc    : 一键启动 MySQL、Redis、主服务、Celery、Mock 和前端。库由镜像创建，表由 Alembic 创建
+# @Author  : xuetang-api
+# @Date    : 2026-11-12
+# @Update  : 2026-11-12 初始化阶段 0 编排
+
+name: xuetang-api
+
+x-app-env: &app-env
+  APP_NAME: xuetang-api
+  APP_ENV: dev
+  APP_SECRET_KEY: dev-only-change-me
+  API_PREFIX: /api/v1
+  MYSQL_HOST: mysql
+  MYSQL_PORT: "3306"
+  MYSQL_USER: xuetang
+  MYSQL_PASSWORD: xuetang_pass
+  MYSQL_DATABASE: xuetang_api
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_PASSWORD: ""
+  ADMIN_USERNAME: admin
+  ADMIN_PASSWORD: Admin@123456
+  JWT_SECRET: dev-only-change-me-jwt
+  JWT_EXPIRE_MINUTES: "120"
+  FERNET_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+  DATA_DIR: /data
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: xuetang-mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+    environment:
+      MYSQL_ROOT_PASSWORD: root_pass
+      MYSQL_DATABASE: xuetang_api
+      MYSQL_USER: xuetang
+      MYSQL_PASSWORD: xuetang_pass
+      TZ: Asia/Shanghai
+    ports:
+      - "${MYSQL_PUBLISH_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot_pass"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7.0
+    container_name: xuetang-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PUBLISH_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  backend:
+    build: ./backend
+    image: xuetang-api-backend:0.1.0
+    container_name: xuetang-backend
+    environment:
+      <<: *app-env
+    command: ["web"]
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - xuetang_data:/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  celery-worker:
+    build: ./backend
+    image: xuetang-api-backend:0.1.0
+    container_name: xuetang-worker
+    environment:
+      <<: *app-env
+    command: ["worker"]
+    volumes:
+      - xuetang_data:/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery-beat:
+    build: ./backend
+    image: xuetang-api-backend:0.1.0
+    container_name: xuetang-beat
+    environment:
+      <<: *app-env
+    command: ["beat"]
+    volumes:
+      - xuetang_data:/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  mock:
+    build: ./backend
+    image: xuetang-api-backend:0.1.0
+    container_name: xuetang-mock
+    environment:
+      <<: *app-env
+    command: ["mock"]
+    ports:
+      - "${MOCK_PORT:-8001}:8001"
+    volumes:
+      - xuetang_data:/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    image: xuetang-api-frontend:0.1.0
+    container_name: xuetang-frontend
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+      mock:
+        condition: service_started
+
+volumes:
+  mysql_data:
+  redis_data:
+  xuetang_data:
