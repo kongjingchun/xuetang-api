@@ -38,7 +38,7 @@ const projectId = computed(() => String(route.params.projectId || selectedId.val
 
 const activeMenu = computed(() => {
   if (route.path.includes("/api-test")) {
-    return `/p/${projectId.value}/api-test/definition`;
+    return `/p/${projectId.value}/api-test/debug`;
   }
   if (route.path.startsWith("/settings")) {
     return "/settings";
@@ -62,7 +62,7 @@ const menus = computed(() => {
   const id = projectId.value;
   const items = [
     { code: "menu:dashboard", index: `/p/${id}/dashboard`, label: "工作台" },
-    { code: "menu:api-test", index: `/p/${id}/api-test/definition`, label: "接口测试" },
+    { code: "menu:api-test", index: `/p/${id}/api-test/debug`, label: "接口测试" },
     { code: "menu:test-plan", index: `/p/${id}/test-plan`, label: "测试计划" },
     { code: "menu:review", index: `/p/${id}/review`, label: "用例评审" },
     { code: "menu:traffic", index: `/p/${id}/traffic`, label: "流量录制" },

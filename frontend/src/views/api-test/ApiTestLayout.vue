@@ -14,8 +14,8 @@ const route = useRoute();
 const router = useRouter();
 
 const active = computed(() => {
-  const part = route.path.split("/").pop() || "definition";
-  return API_TEST_TABS.some((item) => item.name === part) ? part : "definition";
+  const part = route.path.split("/").pop() || "debug";
+  return API_TEST_TABS.some((item) => item.name === part) ? part : "debug";
 });
 
 function changeTab(name: string | number): void {

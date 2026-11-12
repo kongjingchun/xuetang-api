@@ -25,6 +25,7 @@ from app.models.testing import (
     ApiDefinition,
     ApiModule,
     ApiResponseExample,
+    MockRule,
     Scenario,
     ScenarioModule,
     ScenarioStep,
@@ -50,6 +51,7 @@ MENU_PERMISSIONS = (
     ("script:manage", "脚本维护", "button", 170),
     ("datasource:manage", "数据源维护", "button", 180),
     ("audit:read", "审计查询", "button", 190),
+    ("api:manage", "接口维护", "button", 200),
 )
 
 ROLES = (
@@ -122,8 +124,8 @@ def seed_roles(session: Session, permissions: list[SysPermission]) -> dict[str, 
     grants = {
         "system_admin": list(by_code),
         "project_admin": project_menus
-        + ["project:archive", "member:manage", "env:manage", "variable:manage", "script:manage", "datasource:manage"],
-        "tester": project_menus + ["env:manage", "variable:manage", "script:manage", "datasource:manage"],
+        + ["project:archive", "member:manage", "env:manage", "variable:manage", "script:manage", "datasource:manage", "api:manage"],
+        "tester": project_menus + ["env:manage", "variable:manage", "script:manage", "datasource:manage", "api:manage"],
         "guest": ["menu:dashboard", "menu:api-test"],
     }
     for code, name, scope, description in ROLES:
@@ -252,6 +254,22 @@ def seed_demo_assets(session: Session, project: Project, admin: SysUser) -> None
                 description="示例响应",
             )
         )
+    get_or_create(
+        session,
+        MockRule,
+        {"project_id": project.id, "name": "登录成功示例"},
+        {
+            "api_id": api.id,
+            "priority": 10,
+            "status_code": 200,
+            "headers_json": {"Content-Type": "application/json"},
+            "body": '{"code":0,"message":"success","data":{"token":"${__uuid}"}}',
+            "delay_ms": 0,
+            "match_json": {"method": "POST", "path": "/api/v1/u/login"},
+            "fault_type": None,
+            "enabled": True,
+        },
+    )
     case, _ = get_or_create(
         session,
         ApiCase,

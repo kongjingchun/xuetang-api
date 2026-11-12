@@ -41,7 +41,7 @@ const router = createRouter({
           path: "p/:projectId/api-test",
           component: ApiTestLayout,
           children: [
-            { path: "", redirect: (to) => `/p/${to.params.projectId}/api-test/definition` },
+            { path: "", redirect: (to) => `/p/${to.params.projectId}/api-test/debug` },
             { path: "definition", name: "api-definition", component: DefinitionView },
             { path: "debug", name: "api-debug", component: DebugView },
             { path: "scenario", name: "api-scenario", component: ScenarioView },

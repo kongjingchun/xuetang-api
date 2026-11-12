@@ -17,7 +17,7 @@ def test_service_info() -> None:
     """前缀根路径返回阶段号。"""
     response = TestClient(app).get("/api/v1")
     assert response.status_code == 200
-    assert response.json()["data"]["phase"] == 1
+    assert response.json()["data"]["phase"] == 2
 
 
 def test_health_ok(monkeypatch) -> None:
@@ -43,11 +43,28 @@ def test_health_failure_hides_secrets(monkeypatch) -> None:
     assert "xuetang_pass" not in response.text
 
 
-def test_mock_placeholder() -> None:
-    """Mock 路径在阶段 0 明确返回未启用，而不是空成功。"""
+def test_mock_unknown_project(monkeypatch) -> None:
+    """未知项目返回 404，不连接真实数据库。"""
+
+    class _Query:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def one_or_none(self):
+            return None
+
+    class _Session:
+        def query(self, _model):
+            return _Query()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("app.mock_server.main.SessionLocal", lambda: _Session())
     client = TestClient(mock_app)
     health = client.get("/health")
     assert health.status_code == 200
-    missed = client.post("/mock/xuetang/api/v1/u/login")
-    assert missed.status_code == 501
-    assert missed.json()["data"]["project_code"] == "xuetang"
+    assert health.json()["data"]["phase"] == 2
+    missed = client.post("/mock/missing/demo")
+    assert missed.status_code == 404
+    assert missed.json()["message"] == "项目不存在"

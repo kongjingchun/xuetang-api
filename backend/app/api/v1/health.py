@@ -64,7 +64,7 @@ def health():
         "redis": redis_status,
         "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         "version": __version__,
-        "phase": 1,
+        "phase": 2,
     }
     if not healthy:
         return JSONResponse(status_code=503, content=fail("依赖不可用", 5001, payload))

@@ -46,6 +46,7 @@ class ApiDefinition(TimestampMixin, Base):
     tags: Mapped[str] = mapped_column(String(255), nullable=False, default="", server_default="", comment="标签，逗号分隔")
     description: Mapped[str] = mapped_column(Text, nullable=False, default="", comment="接口描述")
     request_json: Mapped[dict] = mapped_column(JSON, nullable=False, comment="参数、请求头和请求体")
+    sort: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"), comment="同级排序")
     revision: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default=text("1"), comment="定义变更版本，用例用它检测接口是否已变"
     )
