@@ -134,6 +134,9 @@ class ApiCase(TimestampMixin, Base):
     api_changed: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("0"), comment="关联接口变更后是否待更新"
     )
+    change_json: Mapped[dict] = mapped_column(
+        JSON, nullable=False, default=dict, comment="关联接口相对用例的变更点"
+    )
 
 
 class ApiCaseVersion(CreatedMixin, Base):

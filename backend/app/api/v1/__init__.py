@@ -11,7 +11,9 @@ from fastapi import APIRouter
 
 from app import __version__
 from app.api.v1.audit import router as audit_router
+from app.api.v1.cases import router as case_router
 from app.api.v1.definitions import router as definition_router
+from app.api.v1.debug import router as debug_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.health import router as health_router
 from app.api.v1.projects import router as project_router
@@ -28,10 +30,12 @@ router.include_router(role_router)
 router.include_router(project_router)
 router.include_router(resource_router)
 router.include_router(definition_router)
+router.include_router(case_router)
+router.include_router(debug_router)
 router.include_router(audit_router)
 
 
 @router.get("")
 def service_info():
     """服务标识，便于确认前缀已经挂上。"""
-    return ok({"name": "xuetang-api", "version": __version__, "phase": 2})
+    return ok({"name": "xuetang-api", "version": __version__, "phase": 3})

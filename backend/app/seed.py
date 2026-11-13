@@ -22,6 +22,7 @@ from app.models.platform import BizTemplate, ExecNode, ExecNodeLabel, RetentionP
 from app.models.project import Environment, Project, ProjectMember, ProjectSetting, Variable
 from app.models.testing import (
     ApiCase,
+    ApiCaseVersion,
     ApiDefinition,
     ApiModule,
     ApiResponseExample,
@@ -291,8 +292,28 @@ def seed_demo_assets(session: Session, project: Project, admin: SysUser) -> None
             },
             "review_status": "draft",
             "api_changed": False,
+            "change_json": {},
         },
     )
+    if session.query(ApiCaseVersion).filter_by(case_id=case.id).count() == 0:
+        session.add(
+            ApiCaseVersion(
+                case_id=case.id,
+                version_no=1,
+                snapshot_json={
+                    "name": case.name,
+                    "api_id": case.api_id,
+                    "priority": case.priority,
+                    "tags": case.tags,
+                    "description": case.description,
+                    "request_json": case.request_json or {},
+                    "processors_json": case.processors_json or {},
+                },
+                remark="初始版本",
+                tagged=False,
+                operator_id=admin.id,
+            )
+        )
     scene_module = _root_module(session, ScenarioModule, project.id, "用户端")
     dev = session.query(Environment).filter_by(project_id=project.id, code="dev").one()
     scenario, created_scene = get_or_create(

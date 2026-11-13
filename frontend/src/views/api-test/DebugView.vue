@@ -39,6 +39,7 @@ interface ParamRow {
 interface DocTab {
   key: string;
   apiId: number | null;
+  caseId: number | null;
   title: string;
   method: string;
   url: string;
@@ -49,6 +50,20 @@ interface DocTab {
   rest: ParamRow[];
   responseText: string;
   responseMeta: string;
+  assertions: { type: string; passed: boolean; message: string }[];
+}
+interface EnvOption {
+  id: number;
+  name: string;
+  base_url: string;
+}
+interface HistoryRow {
+  id: number;
+  method: string;
+  url: string;
+  status: number;
+  elapsed_ms: number;
+  created_at: string;
 }
 
 const route = useRoute();
@@ -67,6 +82,10 @@ const layout = ref("上下");
 const batchVisible = ref(false);
 const batchText = ref("");
 const batchTarget = ref<"headers" | "query">("headers");
+const environments = ref<EnvOption[]>([]);
+const envId = ref<number | null>(null);
+const historyVisible = ref(false);
+const histories = ref<HistoryRow[]>([]);
 let draftSeq = 1;
 const sections = ["请求头", "请求体", "Query", "REST", "前置", "后置", "认证", "设置"];
 const bodyTypes = ["none", "form-data", "x-www-form-urlencoded", "json", "xml", "raw", "binary"];
@@ -91,6 +110,7 @@ function blankTab(partial?: Partial<DocTab>): DocTab {
   draftSeq += 1;
   return {
     apiId: null,
+    caseId: null,
     title: "新建请求",
     method: "GET",
     url: "",
@@ -101,6 +121,7 @@ function blankTab(partial?: Partial<DocTab>): DocTab {
     rest: [emptyHeader()],
     responseText: "",
     responseMeta: "",
+    assertions: [],
     ...partial,
     key,
   };
@@ -159,19 +180,54 @@ function closeTab(key: string): void {
 
 async function load(): Promise<void> {
   const base = `/api/v1/projects/${projectId.value}`;
-  const [moduleBody, apiBody] = await Promise.all([
+  const [moduleBody, apiBody, envBody] = await Promise.all([
     http.get<ApiBody<ModuleRow[]>>(`${base}/modules`),
     http.get<ApiBody<ApiRow[]>>(`${base}/definitions`),
+    http.get<ApiBody<EnvOption[]>>(`${base}/debug/environments`),
   ]);
   modules.value = moduleBody.data.data;
   apis.value = apiBody.data.data;
-  const focus = Number(route.query.apiId || 0);
-  const row = apis.value.find((item) => item.id === focus);
-  if (row) {
-    openApi(row);
-  } else if (!tabs.value.length) {
-    openDraft();
+  environments.value = envBody.data.data;
+  if (envId.value == null && environments.value.length) {
+    envId.value = environments.value[0].id;
   }
+  const caseId = Number(route.query.caseId || 0);
+  const focus = Number(route.query.apiId || 0);
+  if (caseId) {
+    await openCase(caseId);
+  } else {
+    const row = apis.value.find((item) => item.id === focus);
+    if (row) {
+      openApi(row);
+    } else if (!tabs.value.length) {
+      openDraft();
+    }
+  }
+}
+
+async function openCase(caseId: number): Promise<void> {
+  const response = await http.get<ApiBody<{ id: number; name: string; api_id: number | null; request: ApiRow["request"] & { method?: string; path?: string } }>>(
+    `/api/v1/projects/${projectId.value}/cases/${caseId}`,
+  );
+  const item = response.data.data;
+  const api = apis.value.find((row) => row.id === item.api_id);
+  const request = item.request || {};
+  const body = request.body || api?.request.body;
+  const bodyType = body?.type || "none";
+  const tab = blankTab({
+    caseId: item.id,
+    apiId: item.api_id,
+    title: item.name,
+    method: request.method || api?.method || "GET",
+    url: request.path || api?.path || "",
+    bodyType: bodyType === "form" ? "form-data" : bodyType === "urlencoded" ? "x-www-form-urlencoded" : bodyType || "none",
+    bodyText: textOf(body?.content),
+    query: withBlankHeader((request.query as ParamRow[]) || api?.request.query || []),
+    headers: withBlankHeader((request.headers as ParamRow[]) || api?.request.headers || []),
+    rest: withBlankHeader((request.path_params as ParamRow[]) || api?.request.path_params || []),
+  });
+  tabs.value.push(tab);
+  activeKey.value = tab.key;
 }
 
 function filledCount(rows: ParamRow[]): number {
@@ -308,40 +364,61 @@ async function execute(): Promise<void> {
   }
   if (!tab.url.trim()) {
     tab.responseMeta = "";
-    tab.responseText = "请先填写包含 http/https 的完整 URL";
+    tab.responseText = "请填写路径，或包含 http/https 的完整 URL";
+    tab.assertions = [];
     return;
   }
-  const started = performance.now();
-  const sentHeaders: Record<string, string> = {};
-  for (const header of tab.headers) {
-    if (header.enabled === false || !header.name.trim()) {
-      continue;
-    }
-    sentHeaders[header.name.trim()] = header.value;
+  const kind = tab.bodyType === "form-data" ? "form" : tab.bodyType === "x-www-form-urlencoded" ? "urlencoded" : tab.bodyType === "json" ? "json" : tab.bodyType === "none" ? "none" : "raw";
+  const response = await http.post<ApiBody<{ status: number; elapsed_ms: number; body: string; error: string; assertions: DocTab["assertions"]; passed: boolean }>>(
+    `/api/v1/projects/${projectId.value}/debug/send`,
+    {
+      env_id: envId.value,
+      method: tab.method,
+      url: tab.url,
+      headers: tab.headers,
+      query: tab.query,
+      rest: tab.rest,
+      body_type: kind,
+      body_text: tab.bodyText,
+      target_type: tab.caseId ? "case" : "api",
+      target_id: tab.apiId || 0,
+      case_id: tab.caseId,
+    },
+  );
+  const data = response.data.data;
+  tab.assertions = data.assertions || [];
+  tab.responseMeta = data.error
+    ? `请求失败 ${data.error} · ${data.elapsed_ms} ms`
+    : `${data.status} · ${data.elapsed_ms} ms${tab.caseId ? (data.passed ? " · 断言通过" : " · 断言失败") : ""}`;
+  tab.responseText = data.body || (data.error ? data.error : "响应体为空");
+}
+
+async function openHistory(): Promise<void> {
+  const response = await http.get<ApiBody<HistoryRow[]>>(`/api/v1/projects/${projectId.value}/debug/history`);
+  histories.value = response.data.data;
+  historyVisible.value = true;
+}
+
+function onHistory(row: HistoryRow): void {
+  restoreHistory(row).catch(showError);
+}
+
+async function restoreHistory(row: HistoryRow): Promise<void> {
+  const response = await http.get<ApiBody<{ request: { method: string; url: string; headers: Record<string, string>; body_type: string; body: string } }>>(
+    `/api/v1/projects/${projectId.value}/debug/history/${row.id}`,
+  );
+  const request = response.data.data.request;
+  const tab = activeTab.value || blankTab();
+  if (!activeTab.value) {
+    tabs.value.push(tab);
+    activeKey.value = tab.key;
   }
-  try {
-    let address = tab.url;
-    for (const item of tab.rest) {
-      if (item.enabled === false || !item.name.trim()) {
-        continue;
-      }
-      address = address.replaceAll(`{${item.name.trim()}}`, encodeURIComponent(item.value));
-    }
-    const target = new URL(address);
-    for (const item of tab.query) {
-      if (item.enabled === false || !item.name.trim()) {
-        continue;
-      }
-      target.searchParams.append(item.name.trim(), item.value);
-    }
-    const response = await fetch(target.toString(), { method: tab.method, headers: sentHeaders });
-    const text = await response.text();
-    tab.responseMeta = `${response.status} ${response.statusText} · ${Math.round(performance.now() - started)} ms`;
-    tab.responseText = text || "响应体为空";
-  } catch (error) {
-    tab.responseMeta = "请求失败";
-    tab.responseText = error instanceof Error ? error.message : "无法从浏览器发出请求";
-  }
+  tab.method = request.method || "GET";
+  tab.url = request.url || "";
+  tab.bodyType = request.body_type === "form" ? "form-data" : request.body_type === "urlencoded" ? "x-www-form-urlencoded" : request.body_type || "raw";
+  tab.bodyText = request.body || "";
+  tab.headers = withBlankHeader(Object.entries(request.headers || {}).map(([name, value]) => ({ name, value, enabled: true, description: "" })));
+  historyVisible.value = false;
 }
 
 async function save(): Promise<void> {
@@ -684,8 +761,12 @@ watch(projectId, () => {
           <el-select v-model="activeTab.method" style="width: 110px">
             <el-option v-for="item in ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']" :key="item" :label="item" :value="item" />
           </el-select>
-          <el-input v-model="activeTab.url" placeholder="请输入包含 http/https 的完整 URL，或粘贴 curl" @paste="onPasteUrl" />
-          <el-button type="primary" plain @click="execute">服务端执行</el-button>
+          <el-select v-model="envId" clearable placeholder="选择环境" style="width: 140px">
+            <el-option v-for="item in environments" :key="item.id" :label="item.name" :value="item.id" />
+          </el-select>
+          <el-input v-model="activeTab.url" placeholder="路径或完整 URL，也可粘贴 curl" @paste="onPasteUrl" />
+          <el-button type="primary" plain @click="execute().catch(showError)">服务端执行</el-button>
+          <el-button @click="openHistory().catch(showError)">历史</el-button>
           <el-button @click="save().catch(showError)">保存</el-button>
         </div>
         <div class="body-types">
@@ -772,9 +853,24 @@ watch(projectId, () => {
             <span v-if="activeTab.responseMeta">{{ activeTab.responseMeta }}</span>
           </div>
           <div class="resp-body">{{ activeTab.responseText || "点击 服务端执行 获取响应内容" }}</div>
+          <div v-if="activeTab.assertions.length" class="assert-list">
+            <div v-for="(item, index) in activeTab.assertions" :key="index" :class="item.passed ? 'assert-pass' : 'assert-fail'">
+              {{ item.type }} · {{ item.message }}
+            </div>
+          </div>
         </div>
       </template>
     </section>
+    <el-dialog v-model="historyVisible" title="调试历史" width="720px">
+      <el-table :data="histories" size="small" @row-click="onHistory">
+        <el-table-column prop="created_at" label="时间" width="170" />
+        <el-table-column prop="method" label="方法" width="80" />
+        <el-table-column prop="url" label="地址" min-width="220" show-overflow-tooltip />
+        <el-table-column prop="status" label="状态" width="70" />
+        <el-table-column prop="elapsed_ms" label="耗时" width="80" />
+      </el-table>
+      <p class="hint">点击一行可把当时的请求填回当前页签。</p>
+    </el-dialog>
     <el-dialog v-model="batchVisible" :title="batchTarget === 'headers' ? '批量添加请求头' : '批量添加 Query'" width="520px">
       <p class="hint">每行一个参数，格式为 名称:值。添加后默认勾选，会随请求发送。</p>
       <el-input

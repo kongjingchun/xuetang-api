@@ -34,8 +34,10 @@ from app.models.testing import (
 from app.services.audit import write_audit
 from app.services.exporters import export_excel, export_json
 from app.services.guard import get_visible_project
+from app.services.case_diff import change_items, definition_signature
 from app.services.importers import BODY_TYPES, METHODS, load_document, normalize_path, parse_document
 from app.common.variables import VariableValue
+from sqlalchemy import func
 
 router = APIRouter(prefix="/projects/{public_id}", tags=["definitions"])
 
@@ -163,7 +165,43 @@ def _dump_example(row: ApiResponseExample) -> dict:
     }
 
 
-def _dump_api(db: Session, row: ApiDefinition, module_name: str = "", with_examples: bool = False) -> dict:
+def _mark_changed(db: Session, api_id: int, before: dict, after: dict) -> None:
+    """定义上影响请求的字段变了，就把关联用例标成待更新。"""
+    items = change_items(before, after)
+    if not items:
+        return
+    for case in db.query(ApiCase).filter(ApiCase.api_id == api_id).all():
+        case.api_changed = True
+        case.change_json = {"items": items}
+
+
+def _case_stats(db: Session, project_id: int) -> tuple[dict[int, int], set[int]]:
+    """每个接口的用例数，以及至少有一条待更新用例的接口。"""
+    counts = {
+        api_id: count
+        for api_id, count in db.query(ApiCase.api_id, func.count(ApiCase.id))
+        .filter(ApiCase.project_id == project_id, ApiCase.api_id.is_not(None))
+        .group_by(ApiCase.api_id)
+        .all()
+    }
+    changed = {
+        api_id
+        for (api_id,) in db.query(ApiCase.api_id)
+        .filter(ApiCase.project_id == project_id, ApiCase.api_changed.is_(True), ApiCase.api_id.is_not(None))
+        .distinct()
+        .all()
+    }
+    return counts, changed
+
+
+def _dump_api(
+    db: Session,
+    row: ApiDefinition,
+    module_name: str = "",
+    with_examples: bool = False,
+    case_count: int = 0,
+    api_changed: bool = False,
+) -> dict:
     payload = {
         "id": row.id,
         "public_id": row.public_id,
@@ -177,6 +215,8 @@ def _dump_api(db: Session, row: ApiDefinition, module_name: str = "", with_examp
         "request": row.request_json or {},
         "revision": row.revision,
         "sort": row.sort,
+        "case_count": case_count,
+        "api_changed": api_changed,
     }
     if with_examples:
         examples = (
@@ -366,13 +406,25 @@ def list_definitions(public_id: str, user: CurrentUser = Depends(get_active_user
     """接口列表，不含响应示例。"""
     project = get_visible_project(db, user, public_id)
     names = _module_names(db, project.id)
+    counts, changed = _case_stats(db, project.id)
     rows = (
         db.query(ApiDefinition)
         .filter(ApiDefinition.project_id == project.id)
         .order_by(ApiDefinition.sort.asc(), ApiDefinition.id.asc())
         .all()
     )
-    return ok([_dump_api(db, row, names.get(row.module_id or 0, "")) for row in rows])
+    return ok(
+        [
+            _dump_api(
+                db,
+                row,
+                names.get(row.module_id or 0, ""),
+                case_count=counts.get(row.id, 0),
+                api_changed=row.id in changed,
+            )
+            for row in rows
+        ]
+    )
 
 
 @router.get("/definitions/export")
@@ -443,7 +495,9 @@ def update_definition(
     """修改接口。每次保存让 revision 加一，供后续用例标记变更。"""
     project = get_visible_project(db, user, public_id, writable=True)
     row = _definition(db, project.id, api_id)
+    before = definition_signature(row.method, row.path, row.request_json or {})
     _apply_definition(db, project, row, body)
+    _mark_changed(db, row.id, before, definition_signature(row.method, row.path, row.request_json or {}))
     row.revision += 1
     _replace_examples(db, row, body.examples)
     write_audit(db, user.id, "definition", "update", f"修改接口 {row.method} {row.path}", client_ip(request), project.id)
@@ -556,7 +610,9 @@ def _upsert_imported(db: Session, project: Project, items: list[dict]) -> tuple[
             row = _insert_definition(db, project, payload)
             created += 1
         else:
+            before = definition_signature(row.method, row.path, row.request_json or {})
             _apply_definition(db, project, row, payload)
+            _mark_changed(db, row.id, before, definition_signature(row.method, row.path, row.request_json or {}))
             row.revision += 1
             updated += 1
         if payload.examples:

@@ -10,6 +10,7 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { http, type ApiBody } from "@/api/http";
+import CasePanel from "@/views/api-test/CasePanel.vue";
 
 interface ModuleRow {
   id: number;
@@ -25,6 +26,9 @@ interface ApiRow {
   method: string;
   path: string;
   description: string;
+  request?: { query?: unknown[]; headers?: unknown[]; path_params?: unknown[]; body?: { type?: string; content?: unknown } };
+  case_count?: number;
+  api_changed?: boolean;
 }
 interface ExportPack {
   filename: string;
@@ -42,6 +46,8 @@ const moduleVisible = ref(false);
 const apiVisible = ref(false);
 const importVisible = ref(false);
 const importFile = ref<File | null>(null);
+const caseVisible = ref(false);
+const caseApiId = ref<number | null>(null);
 const editingId = ref<number | null>(null);
 const moduleForm = reactive({ name: "", parent_id: null as number | null });
 const apiForm = reactive({ name: "", method: "GET", path: "/", module_id: null as number | null, description: "" });
@@ -134,6 +140,11 @@ async function copyApi(row: ApiRow): Promise<void> {
   await load();
 }
 
+function openCases(apiId: number | null): void {
+  caseApiId.value = apiId;
+  caseVisible.value = true;
+}
+
 function runApi(row: ApiRow): void {
   router.push({ path: `/p/${projectId.value}/api-test/debug`, query: { apiId: String(row.id) } });
 }
@@ -205,6 +216,7 @@ watch(projectId, () => load().catch(showError));
         <el-input v-model="keyword" clearable placeholder="请输入模块/接口名称" />
         <div class="ms-side-actions">
           <el-button type="primary" @click="openCreate">新建接口</el-button>
+          <el-button @click="openCases(null)">新建用例</el-button>
           <el-button @click="importVisible = true">导入接口</el-button>
         </div>
         <div class="ms-folder" :class="{ active: folderKey === 'all' }" @click="folderKey = 'all'">
@@ -240,7 +252,12 @@ watch(projectId, () => load().catch(showError));
       </div>
       <el-table :data="visibleApis" height="100%">
         <el-table-column prop="id" label="ID" width="80" />
-        <el-table-column prop="name" label="接口名称" min-width="160" />
+        <el-table-column label="接口名称" min-width="180">
+          <template #default="{ row }">
+            <span>{{ row.name }}</span>
+            <el-tag v-if="row.api_changed" class="case-flag" size="small" type="warning">接口已变更</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="协议" width="90">
           <template #default>HTTP</template>
         </el-table-column>
@@ -255,7 +272,9 @@ watch(projectId, () => load().catch(showError));
         </el-table-column>
         <el-table-column prop="module" label="所属模块" width="120" />
         <el-table-column label="用例数" width="90">
-          <template #default>0</template>
+          <template #default="{ row }">
+            <el-button link type="primary" @click="openCases(row.id)">{{ row.case_count || 0 }}</el-button>
+          </template>
         </el-table-column>
         <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
@@ -306,5 +325,6 @@ watch(projectId, () => load().catch(showError));
         <el-button type="primary" @click="saveImport().catch(showError)">导入</el-button>
       </template>
     </el-dialog>
+    <CasePanel v-model="caseVisible" :project-id="projectId" :api-id="caseApiId" :apis="apis" @changed="load().catch(showError)" />
   </div>
 </template>

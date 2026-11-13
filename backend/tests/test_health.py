@@ -17,7 +17,7 @@ def test_service_info() -> None:
     """前缀根路径返回阶段号。"""
     response = TestClient(app).get("/api/v1")
     assert response.status_code == 200
-    assert response.json()["data"]["phase"] == 2
+    assert response.json()["data"]["phase"] == 3
 
 
 def test_health_ok(monkeypatch) -> None:

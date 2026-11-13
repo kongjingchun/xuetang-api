@@ -845,6 +845,52 @@ body,
   opacity: 0.4;
 }
 
+.case-toolbar,
+.case-assert,
+.case-grid {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.case-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.case-flag {
+  margin-left: 8px;
+}
+
+.diff-row {
+  display: grid;
+  grid-template-columns: 80px 64px 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 6px;
+}
+
+.diff-row pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.diff-added { background: #e8ffea; }
+.diff-removed { background: #ffece8; }
+.diff-modified { background: #fff7e8; }
+.diff-same { background: #f7f8fa; }
+
+.assert-list {
+  margin-top: 8px;
+}
+
+.assert-pass { color: #00b42a; }
+.assert-fail { color: #f53f3f; }
+
 .node-plus {
   width: 18px;
   height: 18px;

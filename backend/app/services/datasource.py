@@ -96,3 +96,80 @@ def ping_database(db_type: str, host: str, port: int, database: str, username: s
     except Exception as exc:
         raise AppError(f"连接失败: {exc.__class__.__name__}", 4004) from exc
     return "连接成功"
+
+
+def execute_sql(
+    db_type: str,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    sql: str,
+    query_only: bool,
+) -> list[dict]:
+    """
+    执行一条 SQL。断言和前置只允许查询，后置可以写一条语句。
+
+    Raises:
+        AppError: 多条语句、类型不对或数据库报错。报错不回传完整驱动堆栈。
+    """
+    text = sql.strip().rstrip(";").strip()
+    if not text or ";" in text:
+        raise AppError("只允许一条 SQL", 4004)
+    head = text.split(None, 1)[0].lower()
+    if query_only and head not in {"select", "with"}:
+        raise AppError("这里只允许 SELECT", 4004)
+    if head not in {"select", "with", "insert", "update", "delete"}:
+        raise AppError("不支持的 SQL", 4004)
+    kind = db_type.lower()
+    try:
+        if kind == "mysql":
+            import pymysql
+            from pymysql.cursors import DictCursor
+
+            conn = pymysql.connect(
+                host=host, port=port, user=username, password=password, database=database, connect_timeout=3
+            )
+            try:
+                with conn.cursor(DictCursor) as cursor:
+                    cursor.execute(text)
+                    if head in {"select", "with"}:
+                        return [dict(row) for row in cursor.fetchall()]
+                    conn.commit()
+                    return [{"affected": cursor.rowcount}]
+            finally:
+                conn.close()
+        if kind == "postgresql":
+            import psycopg
+            from psycopg.rows import dict_row
+
+            conn = psycopg.connect(
+                host=host, port=port, user=username, password=password, dbname=database, connect_timeout=3
+            )
+            try:
+                with conn.cursor(row_factory=dict_row) as cursor:
+                    cursor.execute(text)
+                    if head in {"select", "with"}:
+                        return [dict(row) for row in cursor.fetchall()]
+                    conn.commit()
+                    return [{"affected": cursor.rowcount}]
+            finally:
+                conn.close()
+        if kind == "sqlite":
+            path = assert_sqlite_path(database)
+            conn = sqlite3.connect(path, timeout=3)
+            conn.row_factory = sqlite3.Row
+            try:
+                cursor = conn.execute(text)
+                if head in {"select", "with"}:
+                    return [dict(row) for row in cursor.fetchall()]
+                conn.commit()
+                return [{"affected": cursor.rowcount}]
+            finally:
+                conn.close()
+        raise AppError("不支持的数据源类型", 4004)
+    except AppError:
+        raise
+    except Exception as exc:
+        raise AppError(f"SQL 执行失败: {exc.__class__.__name__}", 4004) from exc
