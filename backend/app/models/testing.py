@@ -50,6 +50,9 @@ class ApiDefinition(TimestampMixin, Base):
     revision: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default=text("1"), comment="定义变更版本，用例用它检测接口是否已变"
     )
+    creator_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("sys_user.id"), nullable=True, comment="创建人"
+    )
 
 
 class ApiResponseExample(TimestampMixin, Base):

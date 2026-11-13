@@ -20,9 +20,11 @@ from app.core.deps import get_active_user, require_permissions
 from app.core.exceptions import AppError
 from app.core.response import ok
 from app.db.session import get_db
+from app.models.auth import SysUser
 from app.models.project import Environment, Project, Variable
 from app.models.testing import (
     ApiCase,
+    ApiCaseVersion,
     ApiDefinition,
     ApiModule,
     ApiResponseExample,
@@ -209,7 +211,7 @@ def _dump_api(
         "module": module_name,
         "name": row.name,
         "method": row.method,
-        "path": row.path,
+        "path": normalize_path(row.path),
         "tags": row.tags,
         "description": row.description,
         "request": row.request_json or {},
@@ -217,6 +219,9 @@ def _dump_api(
         "sort": row.sort,
         "case_count": case_count,
         "api_changed": api_changed,
+        "creator_id": row.creator_id,
+        "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else "",
+        "updated_at": row.updated_at.strftime("%Y-%m-%d %H:%M:%S") if row.updated_at else "",
     }
     if with_examples:
         examples = (
@@ -407,6 +412,21 @@ def list_definitions(public_id: str, user: CurrentUser = Depends(get_active_user
     project = get_visible_project(db, user, public_id)
     names = _module_names(db, project.id)
     counts, changed = _case_stats(db, project.id)
+    creator_ids = set()
+    for item in (
+        db.query(ApiDefinition.creator_id)
+        .filter(ApiDefinition.project_id == project.id, ApiDefinition.creator_id.is_not(None))
+        .all()
+    ):
+        value = item if isinstance(item, int) else item[0]
+        if value:
+            creator_ids.add(value)
+    creators = {}
+    if creator_ids:
+        creators = {
+            item.id: item.real_name or item.username
+            for item in db.query(SysUser).filter(SysUser.id.in_(creator_ids)).all()
+        }
     rows = (
         db.query(ApiDefinition)
         .filter(ApiDefinition.project_id == project.id)
@@ -422,6 +442,7 @@ def list_definitions(public_id: str, user: CurrentUser = Depends(get_active_user
                 case_count=counts.get(row.id, 0),
                 api_changed=row.id in changed,
             )
+            | {"creator": creators.get(row.creator_id or 0, "")}
             for row in rows
         ]
     )
@@ -431,10 +452,11 @@ def list_definitions(public_id: str, user: CurrentUser = Depends(get_active_user
 def export_definitions(
     public_id: str,
     format: str = "json",
+    ids: str = "",
     user: CurrentUser = Depends(get_active_user),
     db: Session = Depends(get_db),
 ):
-    """导出 JSON 或 Excel。内容以 base64 返回，避免下载接口绕过统一响应。"""
+    """导出 JSON 或 Excel。传入 ids 时只导出选中的接口。"""
     project = get_visible_project(db, user, public_id)
     names = _module_names(db, project.id)
     rows = (
@@ -443,6 +465,9 @@ def export_definitions(
         .order_by(ApiDefinition.sort.asc(), ApiDefinition.id.asc())
         .all()
     )
+    wanted = {int(part) for part in ids.split(",") if part.strip().isdigit()}
+    if wanted:
+        rows = [row for row in rows if row.id in wanted]
     payload = [_dump_api(db, row, names.get(row.module_id or 0, "")) for row in rows]
     if format == "xlsx":
         return ok(export_excel(payload))
@@ -476,6 +501,7 @@ def create_definition(
     """新建接口。"""
     project = get_visible_project(db, user, public_id, writable=True)
     row = _insert_definition(db, project, body)
+    row.creator_id = user.id
     _replace_examples(db, row, body.examples)
     write_audit(db, user.id, "definition", "create", f"创建接口 {row.method} {row.path}", client_ip(request), project.id)
     db.commit()
@@ -513,11 +539,13 @@ def delete_definition(
     user: CurrentUser = Depends(require_permissions("api:manage")),
     db: Session = Depends(get_db),
 ):
-    """删除接口。仍被用例引用时拒绝。"""
+    """删除接口，并一并删除挂在它上面的用例和版本。"""
     project = get_visible_project(db, user, public_id, writable=True)
     row = _definition(db, project.id, api_id)
-    if db.query(ApiCase).filter(ApiCase.api_id == row.id).count():
-        raise AppError("接口仍被用例使用，不能删除", 4004)
+    case_ids = [item.id for item in db.query(ApiCase.id).filter(ApiCase.api_id == row.id).all()]
+    if case_ids:
+        db.query(ApiCaseVersion).filter(ApiCaseVersion.case_id.in_(case_ids)).delete(synchronize_session=False)
+        db.query(ApiCase).filter(ApiCase.id.in_(case_ids)).delete(synchronize_session=False)
     db.query(ApiResponseExample).filter(ApiResponseExample.api_id == row.id).delete(synchronize_session=False)
     db.query(MockRule).filter(MockRule.api_id == row.id).update({MockRule.api_id: None}, synchronize_session=False)
     label = f"{row.method} {row.path}"
@@ -571,7 +599,7 @@ async def import_definitions(
         raise AppError("导入文件不能超过 2MB", 4004)
     document = load_document(raw, file.filename or "")
     items = parse_document(document)
-    created, updated = _upsert_imported(db, project, items)
+    created, updated = _upsert_imported(db, project, items, user.id)
     write_audit(
         db,
         user.id,
@@ -585,7 +613,7 @@ async def import_definitions(
     return ok({"created": created, "updated": updated})
 
 
-def _upsert_imported(db: Session, project: Project, items: list[dict]) -> tuple[int, int]:
+def _upsert_imported(db: Session, project: Project, items: list[dict], creator_id: int | None = None) -> tuple[int, int]:
     created = 0
     updated = 0
     for item in items:
@@ -608,6 +636,7 @@ def _upsert_imported(db: Session, project: Project, items: list[dict]) -> tuple[
         )
         if row is None:
             row = _insert_definition(db, project, payload)
+            row.creator_id = creator_id
             created += 1
         else:
             before = definition_signature(row.method, row.path, row.request_json or {})

@@ -183,28 +183,35 @@ def apply_steps(steps: list[dict], variables: dict[str, str], exchange: Exchange
         name = str(step.get("name") or "")
         if kind == "assign" and name:
             variables[name] = str(step.get("value") or "")
+            hooks.logs.append(f"赋值 {name}")
         elif kind == "wait":
-            hooks.sleep(min(max(int(step.get("ms") or 0), 0), 10000))
+            waited = min(max(int(step.get("ms") or 0), 0), 10000)
+            hooks.sleep(waited)
+            hooks.logs.append(f"等待 {waited} ms")
         elif kind == "script":
             result = hooks.script(str(step.get("script") or ""), _script_params(exchange, variables))
+            _record_script(hooks, "脚本", result)
             if name and result.get("ok") and result.get("result") is not None:
                 variables[name] = str(result.get("result"))
-            hooks.logs.append("脚本完成" if result.get("ok") else str(result.get("error") or "脚本失败"))
         elif kind == "script_ref":
             content = hooks.script_by_id(int(step.get("script_id") or 0))
             result = hooks.script(content, _script_params(exchange, variables))
+            _record_script(hooks, "公共脚本", result)
             if name and result.get("ok") and result.get("result") is not None:
                 variables[name] = str(result.get("result"))
         elif kind == "sql":
             rows = hooks.sql(int(step.get("datasource_id") or 0), str(step.get("sql") or ""), exchange is None)
             if name:
                 variables[name] = _cell(rows)
+            hooks.logs.append(f"SQL 返回 {len(rows)} 行")
         elif kind == "extract" and exchange is not None and name:
             value = extract_text(step, exchange)
             if value is not None:
                 variables[name] = value
+                hooks.logs.append(f"提取 {name}")
         elif kind == "clear" and name:
             variables.pop(name, None)
+            hooks.logs.append(f"清除 {name}")
 
 
 def apply_extractors(items: list[dict], variables: dict[str, str], exchange: Exchange) -> None:
@@ -216,6 +223,16 @@ def apply_extractors(items: list[dict], variables: dict[str, str], exchange: Exc
         value = extract_text(item, exchange)
         if value is not None:
             variables[name] = value
+
+
+def _record_script(hooks: StepHooks, label: str, result: dict) -> None:
+    """把脚本打印和结果写进控制台。"""
+    for item in result.get("logs") or []:
+        hooks.logs.append(str(item))
+    if result.get("ok"):
+        hooks.logs.append(f"{label}完成")
+    else:
+        hooks.logs.append(f"{label}失败: {result.get('error') or ''}")
 
 
 def _script_params(exchange: Exchange | None, variables: dict[str, str]) -> dict:

@@ -7,7 +7,6 @@
 -->
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
-import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { http, type ApiBody } from "@/api/http";
 
@@ -53,8 +52,7 @@ interface DiffRow {
 }
 
 const props = defineProps<{ modelValue: boolean; projectId: string; apiId: number | null; apis: ApiOption[] }>();
-const emit = defineEmits<{ "update:modelValue": [boolean]; changed: [] }>();
-const router = useRouter();
+const emit = defineEmits<{ "update:modelValue": [boolean]; changed: []; execute: [CaseRow] }>();
 const rows = ref<CaseRow[]>([]);
 const selected = ref<CaseRow[]>([]);
 const editorVisible = ref(false);
@@ -310,7 +308,7 @@ function showChange(row: CaseRow): void {
 }
 
 function debugCase(row: CaseRow): void {
-  router.push({ path: `/p/${props.projectId}/api-test/debug`, query: { caseId: String(row.id) } });
+  emit("execute", row);
 }
 
 function showValue(value: unknown): string {

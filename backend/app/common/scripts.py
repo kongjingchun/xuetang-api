@@ -92,6 +92,12 @@ def run_user_script(content: str, params: dict | None = None, timeout: int = DEF
         detail = (proc.stderr or "").strip()[:500]
         raise AppError(detail or "脚本没有输出", 4004)
     try:
-        return json.loads(line[-1])
+        parsed = json.loads(line[-1])
     except json.JSONDecodeError as exc:
         raise AppError("脚本输出无法解析", 4004) from exc
+    logs = [item for item in line[:-1] if item.strip()]
+    error_text = (proc.stderr or "").strip()
+    if error_text:
+        logs.append(error_text[:500])
+    parsed["logs"] = logs
+    return parsed

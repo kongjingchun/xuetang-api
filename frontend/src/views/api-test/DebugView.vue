@@ -6,12 +6,12 @@
 @Update  : 2026-11-13 按 MeterSphere 调试页布局重做
 -->
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { http, type ApiBody } from "@/api/http";
-import { parseCurl } from "@/utils/curl";
 import DebugTree from "@/views/api-test/DebugTree.vue";
+import RequestWorkbench from "@/views/api-test/RequestWorkbench.vue";
 
 interface ModuleRow {
   id: number;
@@ -40,6 +40,8 @@ interface DocTab {
   key: string;
   apiId: number | null;
   caseId: number | null;
+  draftId: string | null;
+  moduleId: number | null;
   title: string;
   method: string;
   url: string;
@@ -50,6 +52,12 @@ interface DocTab {
   rest: ParamRow[];
   responseText: string;
   responseMeta: string;
+  responseHeaders: { name: string; value: string }[];
+  bodyBase64: string;
+  bodyFormat: string;
+  bodyEncoding: string;
+  actualRequest: string;
+  consoleText: string;
   assertions: { type: string; passed: boolean; message: string }[];
 }
 interface EnvOption {
@@ -75,20 +83,26 @@ const expanded = ref<Record<string, boolean>>({});
 const draggingId = ref<number | null>(null);
 const dropHint = ref<{ key: string; place: "before" | "after" | "into" } | null>(null);
 const addName = ref("");
+const addRootOpen = ref(false);
 const tabs = ref<DocTab[]>([]);
 const activeKey = ref("");
-const section = ref("请求体");
-const layout = ref("上下");
-const batchVisible = ref(false);
-const batchText = ref("");
-const batchTarget = ref<"headers" | "query">("headers");
 const environments = ref<EnvOption[]>([]);
 const envId = ref<number | null>(null);
-const historyVisible = ref(false);
-const histories = ref<HistoryRow[]>([]);
+const drafts = ref<DraftRow[]>([]);
+const selectedKey = ref("all");
+
+interface DraftRow {
+  id: string;
+  title: string;
+  method: string;
+  url: string;
+  bodyType: string;
+  bodyText: string;
+  query: ParamRow[];
+  headers: ParamRow[];
+  rest: ParamRow[];
+}
 let draftSeq = 1;
-const sections = ["请求头", "请求体", "Query", "REST", "前置", "后置", "认证", "设置"];
-const bodyTypes = ["none", "form-data", "x-www-form-urlencoded", "json", "xml", "raw", "binary"];
 const activeTab = computed(() => tabs.value.find((item) => item.key === activeKey.value) || null);
 const filteredApis = computed(() => {
   const text = keyword.value.trim().toLowerCase();
@@ -96,6 +110,13 @@ const filteredApis = computed(() => {
     return apis.value;
   }
   return apis.value.filter((item) => `${item.name} ${item.method} ${item.path}`.toLowerCase().includes(text));
+});
+const filteredDrafts = computed(() => {
+  const text = keyword.value.trim().toLowerCase();
+  if (!text) {
+    return drafts.value;
+  }
+  return drafts.value.filter((item) => `${item.title} ${item.method} ${item.url}`.toLowerCase().includes(text));
 });
 
 function showError(error: unknown): void {
@@ -111,6 +132,8 @@ function blankTab(partial?: Partial<DocTab>): DocTab {
   return {
     apiId: null,
     caseId: null,
+    draftId: null,
+    moduleId: null,
     title: "新建请求",
     method: "GET",
     url: "",
@@ -121,14 +144,35 @@ function blankTab(partial?: Partial<DocTab>): DocTab {
     rest: [emptyHeader()],
     responseText: "",
     responseMeta: "",
+    responseHeaders: [],
+    bodyBase64: "",
+    bodyFormat: "预览",
+    bodyEncoding: "UTF-8",
+    actualRequest: "",
+    consoleText: "",
     assertions: [],
     ...partial,
     key,
   };
 }
 
+function chosenModuleId(): number | null {
+  if (selectedKey.value.startsWith("m-")) {
+    return Number(selectedKey.value.slice(2));
+  }
+  if (selectedKey.value.startsWith("api-")) {
+    const api = apis.value.find((item) => item.id === Number(selectedKey.value.slice(4)));
+    return api?.module_id ?? null;
+  }
+  return null;
+}
+
+function selectDebugModule(moduleId: number): void {
+  selectedKey.value = `m-${moduleId}`;
+}
+
 function openDraft(): void {
-  const tab = blankTab();
+  const tab = blankTab({ moduleId: chosenModuleId() });
   tabs.value.push(tab);
   activeKey.value = tab.key;
 }
@@ -143,7 +187,17 @@ function textOf(content: unknown): string {
   return JSON.stringify(content, null, 2);
 }
 
+function displayUrl(path: string): string {
+  const text = (path || "").trim();
+  const absolute = text.replace(/^\/+/, "");
+  if (/^https?:\/\//i.test(absolute)) {
+    return absolute;
+  }
+  return text;
+}
+
 function openApi(row: ApiRow): void {
+  selectedKey.value = `api-${row.id}`;
   const existing = tabs.value.find((item) => item.apiId === row.id);
   if (existing) {
     activeKey.value = existing.key;
@@ -152,9 +206,10 @@ function openApi(row: ApiRow): void {
   const bodyType = row.request.body?.type || "none";
   const tab = blankTab({
     apiId: row.id,
+    moduleId: row.module_id,
     title: row.name,
     method: row.method,
-    url: row.path,
+    url: displayUrl(row.path),
     bodyType: bodyType === "form" ? "form-data" : bodyType === "urlencoded" ? "x-www-form-urlencoded" : bodyType,
     bodyText: textOf(row.request.body?.content),
     query: withBlankHeader(row.request.query || []),
@@ -191,6 +246,7 @@ async function load(): Promise<void> {
   if (envId.value == null && environments.value.length) {
     envId.value = environments.value[0].id;
   }
+  drafts.value = readDrafts();
   const caseId = Number(route.query.caseId || 0);
   const focus = Number(route.query.apiId || 0);
   if (caseId) {
@@ -216,10 +272,10 @@ async function openCase(caseId: number): Promise<void> {
   const bodyType = body?.type || "none";
   const tab = blankTab({
     caseId: item.id,
-    apiId: item.api_id,
+    apiId: null,
     title: item.name,
     method: request.method || api?.method || "GET",
-    url: request.path || api?.path || "",
+    url: displayUrl(request.path || api?.path || ""),
     bodyType: bodyType === "form" ? "form-data" : bodyType === "urlencoded" ? "x-www-form-urlencoded" : bodyType || "none",
     bodyText: textOf(body?.content),
     query: withBlankHeader((request.query as ParamRow[]) || api?.request.query || []),
@@ -357,107 +413,79 @@ function moduleVisibleInTree(moduleId: number): boolean {
   return childModules(moduleId).some((item) => moduleVisibleInTree(item.id));
 }
 
-async function execute(): Promise<void> {
-  const tab = activeTab.value;
-  if (!tab) {
-    return;
+
+function draftStorageKey(): string {
+  return `xt_debug_drafts_${projectId.value}`;
+}
+
+function readDrafts(): DraftRow[] {
+  try {
+    const raw = localStorage.getItem(draftStorageKey());
+    return raw ? (JSON.parse(raw) as DraftRow[]) : [];
+  } catch {
+    return [];
   }
-  if (!tab.url.trim()) {
-    tab.responseMeta = "";
-    tab.responseText = "请填写路径，或包含 http/https 的完整 URL";
-    tab.assertions = [];
-    return;
-  }
+}
+
+function writeDrafts(rows: DraftRow[]): void {
+  localStorage.setItem(draftStorageKey(), JSON.stringify(rows));
+  drafts.value = rows;
+}
+
+function requestPayload(tab: DocTab): Record<string, unknown> {
   const kind = tab.bodyType === "form-data" ? "form" : tab.bodyType === "x-www-form-urlencoded" ? "urlencoded" : tab.bodyType === "json" ? "json" : tab.bodyType === "none" ? "none" : "raw";
-  const response = await http.post<ApiBody<{ status: number; elapsed_ms: number; body: string; error: string; assertions: DocTab["assertions"]; passed: boolean }>>(
-    `/api/v1/projects/${projectId.value}/debug/send`,
-    {
-      env_id: envId.value,
-      method: tab.method,
-      url: tab.url,
-      headers: tab.headers,
-      query: tab.query,
-      rest: tab.rest,
-      body_type: kind,
-      body_text: tab.bodyText,
-      target_type: tab.caseId ? "case" : "api",
-      target_id: tab.apiId || 0,
-      case_id: tab.caseId,
-    },
-  );
-  const data = response.data.data;
-  tab.assertions = data.assertions || [];
-  tab.responseMeta = data.error
-    ? `请求失败 ${data.error} · ${data.elapsed_ms} ms`
-    : `${data.status} · ${data.elapsed_ms} ms${tab.caseId ? (data.passed ? " · 断言通过" : " · 断言失败") : ""}`;
-  tab.responseText = data.body || (data.error ? data.error : "响应体为空");
+  return {
+    query: tab.query.filter((item) => item.name.trim() || item.value.trim()),
+    headers: tab.headers.filter((item) => item.name.trim() || item.value.trim()),
+    path_params: tab.rest.filter((item) => item.name.trim() || item.value.trim()),
+    body: { type: kind, content: kind === "none" ? "" : tab.bodyText },
+  };
 }
 
-async function openHistory(): Promise<void> {
-  const response = await http.get<ApiBody<HistoryRow[]>>(`/api/v1/projects/${projectId.value}/debug/history`);
-  histories.value = response.data.data;
-  historyVisible.value = true;
-}
-
-function onHistory(row: HistoryRow): void {
-  restoreHistory(row).catch(showError);
-}
-
-async function restoreHistory(row: HistoryRow): Promise<void> {
-  const response = await http.get<ApiBody<{ request: { method: string; url: string; headers: Record<string, string>; body_type: string; body: string } }>>(
-    `/api/v1/projects/${projectId.value}/debug/history/${row.id}`,
-  );
-  const request = response.data.data.request;
-  const tab = activeTab.value || blankTab();
-  if (!activeTab.value) {
-    tabs.value.push(tab);
-    activeKey.value = tab.key;
-  }
-  tab.method = request.method || "GET";
-  tab.url = request.url || "";
-  tab.bodyType = request.body_type === "form" ? "form-data" : request.body_type === "urlencoded" ? "x-www-form-urlencoded" : request.body_type || "raw";
-  tab.bodyText = request.body || "";
-  tab.headers = withBlankHeader(Object.entries(request.headers || {}).map(([name, value]) => ({ name, value, enabled: true, description: "" })));
-  historyVisible.value = false;
-}
-
-async function save(): Promise<void> {
+function saveDraft(): void {
   const tab = activeTab.value;
   if (!tab) {
     return;
   }
-  if (!tab.title.trim() || tab.title === "新建请求") {
-    ElMessage.warning("请先把请求名称改成要保存的接口名");
-    return;
+  if (!tab.draftId) {
+    tab.draftId = `draft-${Date.now()}`;
   }
-  const kind = tab.bodyType === "form-data" ? "form" : tab.bodyType === "x-www-form-urlencoded" ? "urlencoded" : tab.bodyType === "none" ? "none" : "raw";
-  const payload = {
-    name: tab.title.trim(),
+  const row: DraftRow = {
+    id: tab.draftId,
+    title: tab.title.trim() || "未命名请求",
     method: tab.method,
-    path: tab.url.trim() || "/",
-    module_id: null,
-    description: "",
-    request_json: {
-      query: tab.query.filter((item) => item.name.trim() || item.value.trim()),
-      headers: tab.headers.filter((item) => item.name.trim() || item.value.trim()),
-      path_params: tab.rest.filter((item) => item.name.trim() || item.value.trim()),
-      body: { type: kind, content: kind === "none" ? "" : tab.bodyText },
-    },
-    examples: [],
+    url: tab.url,
+    bodyType: tab.bodyType,
+    bodyText: tab.bodyText,
+    query: tab.query,
+    headers: tab.headers,
+    rest: tab.rest,
   };
-  if (tab.apiId) {
-    await http.put(`/api/v1/projects/${projectId.value}/definitions/${tab.apiId}`, payload);
-  } else {
-    const response = await http.post<ApiBody<{ id: number }>>(`/api/v1/projects/${projectId.value}/definitions`, payload);
-    tab.apiId = response.data.data.id;
-  }
-  ElMessage.success("请求已保存到接口定义");
-  await load();
+  writeDrafts([row, ...readDrafts().filter((item) => item.id !== row.id)]);
+  ElMessage.success("调试请求已保存，未写入接口定义");
 }
 
-onMounted(() => {
-  load().catch(showError);
-});
+function openDraftRow(row: DraftRow): void {
+  const existing = tabs.value.find((item) => item.draftId === row.id);
+  if (existing) {
+    activeKey.value = existing.key;
+    return;
+  }
+  const tab = blankTab({
+    draftId: row.id,
+    title: row.title,
+    method: row.method,
+    url: row.url,
+    bodyType: row.bodyType,
+    bodyText: row.bodyText,
+    query: withBlankHeader(row.query || []),
+    headers: withBlankHeader(row.headers || []),
+    rest: withBlankHeader(row.rest || []),
+  });
+  tabs.value.push(tab);
+  activeKey.value = tab.key;
+}
+
 function emptyHeader(): ParamRow {
   return { name: "", value: "", description: "", enabled: true };
 }
@@ -490,34 +518,6 @@ function removeHeader(rows: ParamRow[], index: number): void {
   }
 }
 
-function applyParsedCurl(text: string): boolean {
-  const parsed = parseCurl(text);
-  const tab = activeTab.value;
-  if (!parsed || !tab) {
-    return false;
-  }
-  tab.method = parsed.method;
-  tab.url = parsed.url;
-  tab.headers = withBlankHeader(parsed.headers);
-  tab.query = withBlankHeader(parsed.query);
-  tab.rest = withBlankHeader(parsed.rest);
-  tab.bodyType = parsed.bodyType;
-  tab.bodyText = parsed.bodyText;
-  ElMessage.success("已从 curl 填入请求信息");
-  return true;
-}
-
-function onPasteUrl(event: ClipboardEvent): void {
-  const text = event.clipboardData?.getData("text") || "";
-  if (!text.trim().toLowerCase().startsWith("curl")) {
-    return;
-  }
-  event.preventDefault();
-  if (!applyParsedCurl(text)) {
-    ElMessage.warning("没有识别出 curl 里的请求地址");
-  }
-}
-
 async function createModule(parentId: number | null, name: string): Promise<void> {
   const title = name.trim();
   if (!title) {
@@ -526,6 +526,9 @@ async function createModule(parentId: number | null, name: string): Promise<void
   }
   await http.post(`/api/v1/projects/${projectId.value}/modules`, { name: title, parent_id: parentId });
   addName.value = "";
+  if (parentId == null) {
+    addRootOpen.value = false;
+  }
   if (parentId) {
     expanded.value[`m-${parentId}`] = true;
   }
@@ -587,46 +590,9 @@ async function deleteApi(row: ApiRow): Promise<void> {
   await load();
 }
 
-function openBatch(target: "headers" | "query"): void {
-  batchTarget.value = target;
-  batchText.value = "";
-  batchVisible.value = true;
-}
-
-function applyBatch(): void {
-  const tab = activeTab.value;
-  if (!tab) {
-    return;
-  }
-  const parsed: ParamRow[] = [];
-  for (const line of batchText.value.split(/\r?\n/)) {
-    const text = line.trim();
-    if (!text) {
-      continue;
-    }
-    const splitAt = text.includes(":") ? text.indexOf(":") : text.indexOf("：");
-    if (splitAt <= 0) {
-      ElMessage.warning(`无法识别「${text}」，请使用 名称:值`);
-      return;
-    }
-    parsed.push({
-      name: text.slice(0, splitAt).trim(),
-      value: text.slice(splitAt + 1).trim(),
-      description: "",
-      enabled: true,
-    });
-  }
-  const label = batchTarget.value === "headers" ? "请求头" : "Query";
-  if (!parsed.length) {
-    ElMessage.warning(`请填写要添加的${label}`);
-    return;
-  }
-  const rows = batchTarget.value === "headers" ? tab.headers : tab.query;
-  const filled = rows.filter((item) => item.name.trim() || item.value.trim());
-  rows.splice(0, rows.length, ...filled, ...parsed, emptyHeader());
-  batchText.value = "";
-  batchVisible.value = false;
-}
+onMounted(() => {
+  load().catch(showError);
+});
 
 watch(projectId, () => {
   tabs.value = [];
@@ -642,15 +608,15 @@ watch(projectId, () => {
           <el-input v-model="keyword" clearable placeholder="请输入模块/请求名称" />
           <el-button type="primary" @click="openDraft">新建请求</el-button>
         </div>
-        <div class="tree-row">
+        <div class="tree-row" :class="{ active: selectedKey === 'all' }" @click="selectedKey = 'all'">
           <span class="tree-main">
             <span class="tree-icon">
               <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.2a1.5 1.5 0 0 1 1.2.6L8.2 4H13a1.5 1.5 0 0 1 1.5 1.5v7A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5v-9z" /></svg>
             </span>
-            <span>全部请求 ({{ filteredApis.length }})</span>
+            <span>全部接口 ({{ filteredApis.length }})</span>
           </span>
           <span class="tree-ops">
-            <el-popover trigger="click" placement="bottom" :width="280">
+            <el-popover v-model:visible="addRootOpen" trigger="click" placement="bottom" :width="280">
               <template #reference>
                 <button type="button" class="tree-op" @click.stop>+</button>
               </template>
@@ -665,36 +631,13 @@ watch(projectId, () => {
             </el-popover>
           </span>
         </div>
-        <DebugTree
-          :modules="childModules(null)"
-          :depth="0"
-          :keyword="keyword"
-          :is-open="isOpen"
-          :module-apis="moduleApis"
-          :child-modules="childModules"
-          :module-visible="moduleVisibleInTree"
-          :matches-text="matchesText"
-          :drop-hint="dropHint"
-          :dragging-id="draggingId"
-          @toggle="toggleNode"
-          @open-api="openApi"
-          @create-module="(parentId, name) => createModule(parentId, name).catch(showError)"
-          @rename-module="(folder) => renameModule(folder).catch(showError)"
-          @delete-module="(folder) => deleteModule(folder).catch(showError)"
-          @rename-api="(row) => renameApi(row).catch(showError)"
-          @delete-api="(row) => deleteApi(row).catch(showError)"
-          @move-api="(payload) => moveApi(payload).catch(showError)"
-          @hint="dropHint = $event"
-          @drag-start="draggingId = $event"
-          @drag-end="endDrag"
-        />
         <div
           class="tree-row"
-          :class="hintClass('mod-unplanned')"
+          :class="[{ active: selectedKey === 'none' }, hintClass('mod-unplanned')]"
           @dragover.prevent="dropHint = { key: 'mod-unplanned', place: 'into' }"
           @drop="moveApi({ id: Number(($event as DragEvent).dataTransfer?.getData('text/plain') || draggingId || 0), moduleId: null, beforeId: null, place: 'into' }).catch(showError)"
         >
-          <button type="button" class="tree-main" @click="toggleNode('unplanned')">
+          <button type="button" class="tree-main" @click="selectedKey = 'none'; toggleNode('unplanned')">
             <span class="tree-arrow" :class="{ open: isOpen('unplanned') }">▸</span>
             <span class="tree-icon">
               <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.2a1.5 1.5 0 0 1 1.2.6L8.2 4H13a1.5 1.5 0 0 1 1.5 1.5v7A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5v-9z" /></svg>
@@ -709,7 +652,7 @@ watch(projectId, () => {
             :key="item.id"
             type="button"
             class="tree-row request-row"
-            :class="[hintClass(`api-${item.id}`), { 'is-dragging': draggingId === item.id }]"
+            :class="[hintClass(`api-${item.id}`), { 'is-dragging': draggingId === item.id, active: selectedKey === `api-${item.id}` }]"
             draggable="true"
             @click="openApi(item)"
             @dragstart="beginDrag($event, item.id)"
@@ -735,9 +678,35 @@ watch(projectId, () => {
             </span>
           </button>
         </template>
+        <DebugTree
+          :modules="childModules(null)"
+          :depth="0"
+          :keyword="keyword"
+          :is-open="isOpen"
+          :module-apis="moduleApis"
+          :child-modules="childModules"
+          :module-visible="moduleVisibleInTree"
+          :matches-text="matchesText"
+          :drop-hint="dropHint"
+          :dragging-id="draggingId"
+          :selected-module-id="selectedKey.startsWith('m-') ? Number(selectedKey.slice(2)) : null"
+          :selected-api-id="selectedKey.startsWith('api-') ? Number(selectedKey.slice(4)) : null"
+          @toggle="toggleNode"
+          @select-module="selectDebugModule"
+          @open-api="openApi"
+          @create-module="(parentId, name) => createModule(parentId, name).catch(showError)"
+          @rename-module="(folder) => renameModule(folder).catch(showError)"
+          @delete-module="(folder) => deleteModule(folder).catch(showError)"
+          @rename-api="(row) => renameApi(row).catch(showError)"
+          @delete-api="(row) => deleteApi(row).catch(showError)"
+          @move-api="(payload) => moveApi(payload).catch(showError)"
+          @hint="dropHint = $event"
+          @drag-start="draggingId = $event"
+          @drag-end="endDrag"
+        />
       </div>
     </aside>
-    <section class="ms-main">
+    <section class="ms-main debug-main">
       <div class="doc-bar">
         <button
           v-for="tab in tabs"
@@ -753,136 +722,7 @@ watch(projectId, () => {
         </button>
         <el-button circle @click="openDraft">+</el-button>
       </div>
-      <template v-if="activeTab">
-        <div class="req-line">
-          <el-select model-value="HTTP" style="width: 110px" disabled>
-            <el-option label="HTTP" value="HTTP" />
-          </el-select>
-          <el-select v-model="activeTab.method" style="width: 110px">
-            <el-option v-for="item in ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']" :key="item" :label="item" :value="item" />
-          </el-select>
-          <el-select v-model="envId" clearable placeholder="选择环境" style="width: 140px">
-            <el-option v-for="item in environments" :key="item.id" :label="item.name" :value="item.id" />
-          </el-select>
-          <el-input v-model="activeTab.url" placeholder="路径或完整 URL，也可粘贴 curl" @paste="onPasteUrl" />
-          <el-button type="primary" plain @click="execute().catch(showError)">服务端执行</el-button>
-          <el-button @click="openHistory().catch(showError)">历史</el-button>
-          <el-button @click="save().catch(showError)">保存</el-button>
-        </div>
-        <div class="body-types">
-          <button v-for="item in sections" :key="item" type="button" class="section-tab" :class="{ active: section === item }" @click="section = item">
-            {{ item }}
-            <span v-if="sectionCount(item)" class="section-count">{{ sectionCount(item) }}</span>
-          </button>
-        </div>
-        <div v-if="section === '请求体'" class="body-types">
-          <button
-            v-for="item in bodyTypes"
-            :key="item"
-            type="button"
-            :class="{ active: activeTab.bodyType === item }"
-            @click="activeTab.bodyType = item"
-          >
-            {{ item }}
-          </button>
-        </div>
-        <div v-if="section === '请求体' && activeTab.bodyType === 'none'" class="body-empty">请求没有 Body</div>
-        <el-input
-          v-else-if="section === '请求体'"
-          v-model="activeTab.bodyText"
-          type="textarea"
-          :rows="8"
-          placeholder="请求体"
-        />
-        <div v-else-if="section === '请求头'" class="header-table">
-          <div class="header-row header-row-title">
-            <span />
-            <span>参数名称</span>
-            <span>参数值</span>
-            <span>描述</span>
-            <el-button link type="primary" @click="openBatch('headers')">批量添加</el-button>
-          </div>
-          <div v-for="(param, index) in activeTab.headers" :key="index" class="header-row">
-            <el-checkbox v-model="param.enabled" />
-            <el-input v-model="param.name" placeholder="参数名称" @input="onHeaderInput(activeTab.headers)" />
-            <el-input v-model="param.value" placeholder="参数值" @input="onHeaderInput(activeTab.headers)" />
-            <el-input v-model="param.description" placeholder="描述" />
-            <el-button link type="danger" @click="removeHeader(activeTab.headers, index)">－</el-button>
-          </div>
-        </div>
-        <div v-else-if="section === 'REST'" class="header-table">
-          <div class="header-row header-row-title">
-            <span />
-            <span>参数名称</span>
-            <span>参数值</span>
-            <span>描述</span>
-            <span />
-          </div>
-          <div v-for="(param, index) in activeTab.rest" :key="index" class="header-row">
-            <el-checkbox v-model="param.enabled" />
-            <el-input v-model="param.name" placeholder="参数名称" @input="onHeaderInput(activeTab.rest)" />
-            <el-input v-model="param.value" placeholder="参数值" @input="onHeaderInput(activeTab.rest)" />
-            <el-input v-model="param.description" placeholder="描述" />
-            <el-button link type="danger" @click="removeHeader(activeTab.rest, index)">－</el-button>
-          </div>
-        </div>
-        <div v-else-if="section === 'Query'" class="header-table">
-          <div class="header-row header-row-title">
-            <span />
-            <span>参数名称</span>
-            <span>参数值</span>
-            <span>描述</span>
-            <el-button link type="primary" @click="openBatch('query')">批量添加</el-button>
-          </div>
-          <div v-for="(param, index) in activeTab.query" :key="index" class="header-row">
-            <el-checkbox v-model="param.enabled" />
-            <el-input v-model="param.name" placeholder="参数名称" @input="onHeaderInput(activeTab.query)" />
-            <el-input v-model="param.value" placeholder="参数值" @input="onHeaderInput(activeTab.query)" />
-            <el-input v-model="param.description" placeholder="描述" />
-            <el-button link type="danger" @click="removeHeader(activeTab.query, index)">－</el-button>
-          </div>
-        </div>
-        <div v-else class="body-empty">{{ section }}将在后续阶段接入</div>
-        <div class="resp-pane" :class="{ side: layout === '左右' }">
-          <div class="resp-head">
-            <span>响应内容</span>
-            <el-button-group>
-              <el-button size="small" :type="layout === '上下' ? 'primary' : 'default'" @click="layout = '上下'">上下</el-button>
-              <el-button size="small" :type="layout === '左右' ? 'primary' : 'default'" @click="layout = '左右'">左右</el-button>
-            </el-button-group>
-            <span v-if="activeTab.responseMeta">{{ activeTab.responseMeta }}</span>
-          </div>
-          <div class="resp-body">{{ activeTab.responseText || "点击 服务端执行 获取响应内容" }}</div>
-          <div v-if="activeTab.assertions.length" class="assert-list">
-            <div v-for="(item, index) in activeTab.assertions" :key="index" :class="item.passed ? 'assert-pass' : 'assert-fail'">
-              {{ item.type }} · {{ item.message }}
-            </div>
-          </div>
-        </div>
-      </template>
+      <RequestWorkbench v-if="activeTab" :project-id="projectId" :tab="activeTab" save-mode="debug" @saved="load().catch(showError)" />
     </section>
-    <el-dialog v-model="historyVisible" title="调试历史" width="720px">
-      <el-table :data="histories" size="small" @row-click="onHistory">
-        <el-table-column prop="created_at" label="时间" width="170" />
-        <el-table-column prop="method" label="方法" width="80" />
-        <el-table-column prop="url" label="地址" min-width="220" show-overflow-tooltip />
-        <el-table-column prop="status" label="状态" width="70" />
-        <el-table-column prop="elapsed_ms" label="耗时" width="80" />
-      </el-table>
-      <p class="hint">点击一行可把当时的请求填回当前页签。</p>
-    </el-dialog>
-    <el-dialog v-model="batchVisible" :title="batchTarget === 'headers' ? '批量添加请求头' : '批量添加 Query'" width="520px">
-      <p class="hint">每行一个参数，格式为 名称:值。添加后默认勾选，会随请求发送。</p>
-      <el-input
-        v-model="batchText"
-        type="textarea"
-        :rows="8"
-        :placeholder="batchTarget === 'headers' ? 'Content-Type:application/json' : 'page:1'"
-      />
-      <template #footer>
-        <el-button @click="batchVisible = false">取消</el-button>
-        <el-button type="primary" @click="applyBatch">添加</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>

@@ -24,8 +24,11 @@ def empty_request() -> dict:
 
 
 def normalize_path(path: str) -> str:
-    """补上前导斜杠，并去掉结尾斜杠。根路径保持 /。"""
+    """补上前导斜杠，并去掉结尾斜杠。根路径保持 /。完整的 http(s) 地址原样保留。"""
     text = (path or "").strip() or "/"
+    absolute = text.lstrip("/")
+    if absolute.lower().startswith("http://") or absolute.lower().startswith("https://"):
+        return absolute
     if not text.startswith("/"):
         text = "/" + text
     if len(text) > 1 and text.endswith("/"):

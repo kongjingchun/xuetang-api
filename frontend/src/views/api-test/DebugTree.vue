@@ -43,10 +43,13 @@ const props = defineProps<{
   matchesText: (value: string) => boolean;
   dropHint: { key: string; place: "before" | "after" | "into" } | null;
   draggingId: number | null;
+  selectedModuleId?: number | null;
+  selectedApiId?: number | null;
 }>();
 
 const emit = defineEmits<{
   toggle: [key: string];
+  selectModule: [moduleId: number];
   openApi: [row: ApiRow];
   createModule: [parentId: number | null, name: string];
   renameModule: [folder: ModuleRow];
@@ -60,10 +63,20 @@ const emit = defineEmits<{
 }>();
 
 const names = ref<Record<number, string>>({});
+const addOpen = ref<Record<number, boolean>>({});
+
+function setAddOpen(folderId: number, value: boolean): void {
+  addOpen.value[folderId] = value;
+}
 
 function submit(folderId: number): void {
-  emit("createModule", folderId, names.value[folderId] || "");
+  const name = (names.value[folderId] || "").trim();
+  if (!name) {
+    return;
+  }
+  emit("createModule", folderId, name);
   names.value[folderId] = "";
+  addOpen.value[folderId] = false;
 }
 
 function dragId(event: DragEvent): number {
@@ -128,12 +141,12 @@ function dropApi(event: DragEvent, item: ApiRow): void {
     <div
       v-if="moduleVisible(folder.id)"
       class="tree-row"
-      :class="hintClass(`mod-${folder.id}`)"
+      :class="[hintClass(`mod-${folder.id}`), { active: selectedModuleId === folder.id }]"
       :style="{ paddingLeft: `${depth * 16}px` }"
       @dragover="overFolder($event, folder.id)"
       @drop.stop="emit('moveApi', { id: dragId($event), moduleId: folder.id, beforeId: null, place: 'into' })"
     >
-      <button type="button" class="tree-main" @click="emit('toggle', `m-${folder.id}`)">
+      <button type="button" class="tree-main" @click="emit('toggle', `m-${folder.id}`); emit('selectModule', folder.id)">
         <span class="tree-arrow" :class="{ open: isOpen(`m-${folder.id}`) }">▸</span>
         <span class="tree-icon">
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.2a1.5 1.5 0 0 1 1.2.6L8.2 4H13a1.5 1.5 0 0 1 1.5 1.5v7A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5v-9z" /></svg>
@@ -142,7 +155,7 @@ function dropApi(event: DragEvent, item: ApiRow): void {
         <span class="ms-count">{{ moduleApis(folder.id).length }}</span>
       </button>
       <span class="tree-ops" @click.stop>
-        <el-popover trigger="click" placement="bottom" :width="280">
+        <el-popover :visible="addOpen[folder.id] === true" trigger="click" placement="bottom" :width="280" @update:visible="setAddOpen(folder.id, $event)">
           <template #reference>
             <button type="button" class="tree-op">+</button>
           </template>
@@ -150,7 +163,7 @@ function dropApi(event: DragEvent, item: ApiRow): void {
             <div class="add-module-title">添加子模块</div>
             <el-input v-model="names[folder.id]" placeholder="请输入名称，按回车键保存" @keyup.enter="submit(folder.id)" />
             <div class="add-module-actions">
-              <el-button @click="names[folder.id] = ''">取消</el-button>
+              <el-button @click="names[folder.id] = ''; setAddOpen(folder.id, false)">取消</el-button>
               <el-button type="primary" @click="submit(folder.id)">确定</el-button>
             </div>
           </div>
@@ -178,7 +191,10 @@ function dropApi(event: DragEvent, item: ApiRow): void {
       :matches-text="matchesText"
       :drop-hint="dropHint"
       :dragging-id="draggingId"
+      :selected-module-id="selectedModuleId"
+      :selected-api-id="selectedApiId"
       @toggle="emit('toggle', $event)"
+      @select-module="emit('selectModule', $event)"
       @open-api="emit('openApi', $event)"
       @create-module="(parentId, name) => emit('createModule', parentId, name)"
       @rename-module="emit('renameModule', $event)"
@@ -196,7 +212,7 @@ function dropApi(event: DragEvent, item: ApiRow): void {
         :key="item.id"
         type="button"
         class="tree-row request-row"
-        :class="[hintClass(`api-${item.id}`), { 'is-dragging': draggingId === item.id }]"
+        :class="[hintClass(`api-${item.id}`), { 'is-dragging': draggingId === item.id, active: selectedApiId === item.id }]"
         draggable="true"
         :style="{ paddingLeft: `${(depth + 1) * 16}px` }"
         @click="emit('openApi', item)"

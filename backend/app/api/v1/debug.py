@@ -7,7 +7,7 @@
 
 """在线调试。加密变量只在发出前解密，历史里保持掩码。"""
 
-import json
+import base64
 import time
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -104,6 +104,10 @@ def _build_target(env: Environment | None, body: DebugIn, layers: dict, reveal: 
         value = quote(_render(str(item.get("value") or ""), layers, reveal), safe="")
         address = address.replace("{" + str(item.get("name")).strip() + "}", value)
     address = _render(address, layers, reveal)
+    # 已保存的完整地址可能被多加了一个前导斜杠，先去掉再判断是不是绝对地址。
+    absolute = address.lstrip("/")
+    if absolute.lower().startswith("http://") or absolute.lower().startswith("https://"):
+        address = absolute
     if not address.startswith("http://") and not address.startswith("https://"):
         if env is None or not env.base_url:
             raise AppError("相对路径需要选择带基础地址的环境", 4004)
@@ -132,15 +136,13 @@ def _build_target(env: Environment | None, body: DebugIn, layers: dict, reveal: 
     return address, headers, payload
 
 
-def _format_body(text: str) -> str:
-    """JSON 响应排版。不是 JSON 时原样返回。"""
-    stripped = text.strip()
-    if not stripped or stripped[0] not in "{[":
-        return text
+def _decode_body(raw: bytes, encoding: str | None) -> str:
+    """按响应声明的编码解出文本。断言仍使用这份文本。"""
+    charset = encoding or "utf-8"
     try:
-        return json.dumps(json.loads(stripped), ensure_ascii=False, indent=2)
-    except json.JSONDecodeError:
-        return text
+        return raw.decode(charset, errors="replace")
+    except LookupError:
+        return raw.decode("utf-8", errors="replace")
 
 
 def _hooks(db: Session, project_id: int) -> StepHooks:
@@ -236,6 +238,8 @@ def send_debug(
     status = 0
     response_headers: dict[str, str] = {}
     response_body = ""
+    body_base64 = ""
+    redirects: list[str] = []
     error = ""
     address = body.url
     headers: dict[str, str] = {}
@@ -250,16 +254,20 @@ def send_debug(
         layers = _layers(db, project.id, env.id if env else None, runtime)
         address, headers, payload = _build_target(env, body, layers, True)
         masked_url, masked_headers, masked_body = _build_target(env, body, layers, False)
-        with httpx.Client(timeout=30, follow_redirects=False) as client:
+        with httpx.Client(timeout=30, follow_redirects=True, max_redirects=5) as client:
             response = client.request(
                 body.method.upper(),
                 address,
                 headers=headers,
                 content=payload.encode("utf-8") if payload else None,
             )
+        for hop in response.history:
+            redirects.append(f"重定向 {hop.status_code} {hop.headers.get('location', '')}")
         status = response.status_code
         response_headers = dict(response.headers)
-        response_body = response.text[:BODY_LIMIT]
+        raw = response.content[:BODY_LIMIT]
+        body_base64 = base64.b64encode(raw).decode("ascii")
+        response_body = _decode_body(raw, response.encoding)
     except AppError as exc:
         error = exc.message
     except httpx.HTTPError as exc:
@@ -274,6 +282,16 @@ def send_debug(
             assertions = evaluate_assertions(list(processors.get("assertions") or []), exchange, hooks, runtime)
         except AppError as exc:
             error = exc.message
+    console = [f"请求 {body.method.upper()} {masked_url}"]
+    console.extend(redirects)
+    console.extend(str(item) for item in hooks.logs)
+    if error:
+        console.append(f"错误 {error}")
+    else:
+        console.append(f"响应 {status}，耗时 {elapsed} ms")
+    for item in assertions:
+        state = "通过" if item.get("passed") else "失败"
+        console.append(f"断言 {item.get('type')} {state}：{item.get('message')}")
     history = DebugHistory(
         project_id=project.id,
         user_id=user.id,
@@ -294,6 +312,7 @@ def send_debug(
             "error": error,
             "assertions": assertions,
             "passed": assertions_passed(assertions),
+            "console": console,
         },
         elapsed_ms=elapsed,
     )
@@ -306,7 +325,15 @@ def send_debug(
             "status": status,
             "elapsed_ms": elapsed,
             "headers": response_headers,
-            "body": _format_body(response_body),
+            "body": response_body,
+            "body_base64": body_base64,
+            "request": {
+                "method": body.method.upper(),
+                "url": masked_url,
+                "headers": masked_headers,
+                "body": masked_body,
+            },
+            "console": console,
             "error": error,
             "assertions": assertions,
             "passed": assertions_passed(assertions),
